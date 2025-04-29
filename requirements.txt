@@ -1,0 +1,24 @@
+# requirements.txt
+
+# --- Core API ---
+fastapi>=0.100.0,<0.112.0 # Nên giới hạn phiên bản để tránh breaking changes đột ngột
+uvicorn[standard]>=0.20.0,<0.30.0 # Bao gồm các dependency chuẩn như websockets, httptools
+
+# --- Data Handling & ML ---
+pandas>=1.5.0,<2.3.0
+scikit-learn>=1.3.0,<1.6.0 # Quan trọng cho ML
+joblib>=1.2.0,<1.5.0 # Để lưu/tải model hiệu quả
+
+# --- Vietnamese NLP ---
+# Chọn MỘT trong hai thư viện sau (hoặc cả hai nếu cần thử nghiệm)
+# underthesea>=1.3.0,<2.0.0
+pyvi>=0.1.1,<0.2.0 # Nếu bạn chọn dùng pyvi
+
+# --- Configuration & Testing ---
+python-dotenv>=1.0.0,<2.0.0 # Đọc file .env
+pytest>=7.0.0,<9.0.0 # Để chạy tests (không bắt buộc cho production image)
+
+# --- Optional (Có thể cần nếu dùng các model/kỹ thuật khác) ---
+numpy>=1.23.0,<2.0.0 # Thường được cài như dependency của pandas/sklearn
+xgboost
+lightgbm

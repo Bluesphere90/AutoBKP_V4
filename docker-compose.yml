@@ -1,0 +1,36 @@
+# docker-compose.yml
+
+version: '3.8' # Sử dụng phiên bản docker-compose phù hợp
+
+services:
+  api_server:
+    build:
+      context: . # Build image từ Dockerfile trong thư mục hiện tại
+      dockerfile: Dockerfile
+    container_name: hachtoan_mahanghoa_api # Tên container (tùy chọn)
+    restart: unless-stopped # Tự khởi động lại container trừ khi bị stop thủ công
+    ports:
+      # Map cổng 8000 trên máy host tới cổng 8000 trong container
+      - "8000:8000"
+    volumes:
+      # --- QUAN TRỌNG: Sử dụng Named Volumes ---
+      # Mount volume 'app_data' vào /app/data trong container
+      - app_data:/app/data
+      # Mount volume 'app_models' vào /app/models trong container
+      - app_models:/app/models
+      # (Tùy chọn - Chỉ cho Development) Mount code để thấy thay đổi ngay lập tức với --reload
+      # Nếu dùng dòng này, bạn cần comment/xóa lệnh COPY ./app trong Dockerfile
+      # - ./app:/app/app
+
+
+volumes:
+  # --- Định nghĩa Named Volumes ---
+  # Docker sẽ quản lý các volume này, dữ liệu sẽ được giữ lại ngay cả khi container bị xóa
+  app_data:
+    driver: local # Sử dụng driver mặc định
+  app_models:
+    driver: local
+
+# networks: # (Tùy chọn)
+#   my_network:
+#     driver: bridge

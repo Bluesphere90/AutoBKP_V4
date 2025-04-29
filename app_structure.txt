@@ -1,0 +1,53 @@
+hach_toan_ma_hang_hoa_prediction/
+├── app/                      # Thư mục chứa code ứng dụng chính (API, ML logic)
+│   ├── api/                  # Code liên quan đến API (FastAPI)
+│   │   ├── endpoints/        # Các file định nghĩa endpoints cụ thể
+│   │   │   ├── __init__.py
+│   │   │   ├── training.py   # Endpoint cho training và incremental training
+│   │   │   └── prediction.py # Endpoint cho dự đoán
+│   │   ├── schemas.py        # Pydantic models định nghĩa cấu trúc request/response
+│   │   ├── __init__.py
+│   │   └── main.py           # Khởi tạo ứng dụng FastAPI và routers
+│   │
+│   ├── core/                 # Các thành phần cốt lõi, cấu hình
+│   │   ├── config.py         # Cấu hình (đường dẫn, hằng số)
+│   │   └── __init__.py
+│   │
+│   ├── ml/                   # Logic xử lý Machine Learning
+│   │   ├── data_handler.py   # Xử lý load, validate, chuẩn bị dữ liệu (Đã cung cấp code)
+│   │   ├── feature_engineering.py # (Có thể tích hợp vào pipeline.py)
+│   │   ├── models.py         # Định nghĩa, huấn luyện, load/save mô hình (Sẽ cung cấp code)
+│   │   ├── outlier_detector.py # Logic phát hiện outlier (Sẽ cung cấp code)
+│   │   ├── pipeline.py       # Kết hợp các bước (preprocessing, model) thành pipeline (Sẽ cung cấp code tiếp theo)
+│   │   ├── __init__.py
+│   │   └── utils.py          # Các hàm tiện ích (quản lý đường dẫn, load/save joblib) (Đã cung cấp code)
+│   │
+│   └── __init__.py
+│
+├── data/                     # Thư mục này sẽ được mount qua Docker Volume
+│   └── client_data/          # Dữ liệu huấn luyện của từng khách hàng
+│       └── {client_id}/      # Dữ liệu của một khách hàng cụ thể
+│           ├── training_data.csv
+│           └── incremental_data_{timestamp}.csv # Dữ liệu huấn luyện tăng cường
+│
+├── models/                   # Thư mục này sẽ được mount qua Docker Volume
+│   └── client_models/        # Mô hình và các thành phần liên quan của từng khách hàng
+│       └── {client_id}/      # Mô hình của một khách hàng cụ thể
+│           ├── preprocessor_hachtoan.joblib  # <-- Preprocessor cho model HachToan
+│           ├── preprocessor_mahanghoa.joblib # <-- Preprocessor cho model MaHangHoa
+│           ├── hachtoan_model.joblib         # <-- Mô hình dự đoán HachToan
+│           ├── mahanghoa_model.joblib        # <-- Mô hình dự đoán MaHangHoa
+│           ├── outlier_detector_1.joblib     # <-- Mô hình outlier cho input HachToan
+│           ├── outlier_detector_2.joblib     # <-- Mô hình outlier cho input MaHangHoa
+│           └── label_encoders/               # <-- Thư mục chứa các bộ mã hóa nhãn
+│               ├── hachtoan_encoder.joblib
+│               └── mahanghoa_encoder.joblib
+│
+├── tests/                    # Thư mục chứa unit tests và integration tests (Chưa triển khai code)
+│   └── ...
+│
+├── docker-compose.yml        # File định nghĩa services, volumes (Sẽ cung cấp code)
+├── Dockerfile                # File định nghĩa cách build Docker image (Sẽ cung cấp code)
+├── requirements.txt          # Danh sách các thư viện Python (Sẽ cung cấp code)
+├── .env                      # (Tùy chọn) Chứa biến môi trường (Ví dụ)
+└── README.md                 # Mô tả dự án, hướng dẫn (Sẽ cung cấp code)
