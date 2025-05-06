@@ -1,179 +1,245 @@
+# app/ml/pipeline.py
+
 import logging
-import re
 import pandas as pd
-from typing import List, Optional
+from typing import Dict, List, Tuple, Any, Optional
 
-# --- Xử lý tiếng Việt ---
-# Chọn một thư viện: underthesea hoặc pyvi
-# Đảm bảo đã cài đặt: pip install underthesea hoac pip install pyvi
-try:
-    from underthesea import word_tokenize
-    VIETNAMESE_TOKENIZER = 'underthesea'
-except ImportError:
-    try:
-        from pyvi import ViTokenizer
-        VIETNAMESE_TOKENIZER = 'pyvi'
-    except ImportError:
-        VIETNAMESE_TOKENIZER = None
-        logging.warning("Không tìm thấy thư viện 'underthesea' hoặc 'pyvi'. Xử lý tiếng Việt sẽ bị hạn chế.")
-
-# --- Scikit-learn ---
-from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.preprocessing import FunctionTransformer # Có thể cần cho các bước tùy chỉnh
 
-# --- Project imports ---
-from app.core.config import (
-    INPUT_COLUMNS,
-    TARGET_HACHTOAN,
-    TARGET_MAHANGHOA,
-    TFIDF_MAX_FEATURES,
+# Import các lớp processor đã định nghĩa
+from app.ml.processors import (
+    VietnameseTextCleaner,
+    VietnameseWordTokenizer,
+    EnglishTextCleaner,
+    EnglishWordTokenizer,
+    StopwordRemover,
+    TfidfVectorizerWrapper,
+    NumericalImputer,
+    NumericalScaler,
+    CategoricalEncoder,
+    HashingEncoder
 )
+# Import config để lấy các giá trị mặc định nếu cần
+import app.core.config as config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Bước tiền xử lý văn bản tiếng Việt ---
+# --- Processor Registry ---
+# Ánh xạ từ (type, subtype/language) hoặc type đến lớp processor tương ứng
+PROCESSOR_REGISTRY = {
+    # Text Processors
+    ("text", "vi", "clean"): VietnameseTextCleaner,
+    ("text", "en", "clean"): EnglishTextCleaner, # Giả sử có EnglishTextCleaner
+    ("text", "vi", "tokenize"): VietnameseWordTokenizer,
+    ("text", "en", "tokenize"): EnglishWordTokenizer, # Giả sử có
+    ("text", "vi", "stopwords"): lambda params: StopwordRemover(language='vi', **params), # Dùng lambda nếu cần truyền tham số đặc biệt
+    ("text", "en", "stopwords"): lambda params: StopwordRemover(language='en', **params),
+    ("text", None, "tfidf"): TfidfVectorizerWrapper, # Xử lý TFIDF chung (cần cột đã tiền xử lý)
 
-def preprocess_vietnamese_text(text_series: pd.Series) -> pd.Series:
-    """Áp dụng các bước làm sạch và tách từ cho cột văn bản tiếng Việt."""
-    # 1. Chuyển thành chữ thường
-    processed_series = text_series.str.lower()
-    # 2. Loại bỏ ký tự đặc biệt (giữ lại khoảng trắng và ký tự tiếng Việt)
-    processed_series = processed_series.apply(lambda x: re.sub(r'[^\w\s]', '', str(x)))
-    # 3. (Tùy chọn) Loại bỏ số
-    # processed_series = processed_series.apply(lambda x: re.sub(r'\d+', '', x))
-    # 4. Tách từ
-    if VIETNAMESE_TOKENIZER == 'underthesea':
-        processed_series = processed_series.apply(lambda x: word_tokenize(x, format="text"))
-    elif VIETNAMESE_TOKENIZER == 'pyvi':
-        processed_series = processed_series.apply(lambda x: ViTokenizer.tokenize(x))
-    else:
-        # Fallback: tách từ cơ bản bằng khoảng trắng nếu không có thư viện
-        logger.warning("Sử dụng tách từ cơ bản bằng khoảng trắng.")
-        processed_series = processed_series.apply(lambda x: ' '.join(x.split()))
+    # Numerical Processors
+    "numerical_imputer": NumericalImputer,
+    "numerical_scaler": NumericalScaler,
 
-    # 5. (Tùy chọn) Loại bỏ stopwords - Cần danh sách stopwords tiếng Việt
-    # ... (thêm logic loại bỏ stopwords nếu cần) ...
+    # Categorical Processors
+    "categorical_onehot": CategoricalEncoder, # Mặc định strategy='onehot'
+    "categorical_hashing": HashingEncoder,
 
-    return processed_series
+    # Có thể thêm các loại khác: datetime, ignore, etc.
+}
 
-# Tạo FunctionTransformer để tích hợp vào Pipeline
-vietnamese_text_processor = FunctionTransformer(preprocess_vietnamese_text, validate=False)
+# --- Dynamic Pipeline Builder ---
 
-# --- Định nghĩa các Pipeline tiền xử lý ---
-
-def create_preprocessor(input_features: List[str], include_hachtoan_input: bool = False) -> ColumnTransformer:
+def build_dynamic_preprocessor(column_metadata: Dict[str, Dict[str, Any]]) -> ColumnTransformer:
     """
-    Tạo ColumnTransformer để tiền xử lý các features.
-    Linh hoạt với các cột input bổ sung.
+    Xây dựng ColumnTransformer động dựa trên metadata cấu hình cột.
 
     Args:
-        input_features: Danh sách tên các cột input có trong DataFrame.
-        include_hachtoan_input: True nếu HachToan là một input (cho model MaHangHoa).
+        column_metadata: Dictionary chứa cấu hình cho từng cột.
+                         Ví dụ: {"columns": {"col_name": {"type": "text", "language": "vi", ...}}}
 
     Returns:
-        Một đối tượng ColumnTransformer đã cấu hình.
+        Một đối tượng ColumnTransformer chưa được fit.
     """
-    transformers = []
+    transformers = [] # List các tuple ('name', transformer_pipeline, columns)
+    processed_columns = set() # Theo dõi các cột đã được đưa vào transformer
 
-    # Xác định các cột cho từng loại xử lý
-    text_features = ['TenHangHoaDichVu']
-    categorical_features = ['MSTNguoiBan']
-    if include_hachtoan_input and TARGET_HACHTOAN in input_features:
-        categorical_features.append(TARGET_HACHTOAN)
+    if not column_metadata or "columns" not in column_metadata:
+        raise ValueError("Metadata cấu hình cột không hợp lệ hoặc thiếu key 'columns'.")
 
-    # Xác định các cột còn lại (có thể là số hoặc categorical khác)
-    # Đây là phần cần linh hoạt để mở rộng
-    processed_cols = set(text_features + categorical_features)
-    remaining_cols = [col for col in input_features if col not in processed_cols]
+    metadata_cols = column_metadata["columns"]
 
-    numerical_features = []
-    other_categorical_features = []
+    # --- Xử lý các cột TEXT ---
+    text_cols_config = {
+        col: cfg for col, cfg in metadata_cols.items()
+        if cfg.get("type") == "text" and cfg.get("language") # Chỉ xử lý text có language
+    }
+    # Nhóm các cột text theo ngôn ngữ và các bước xử lý
+    text_pipelines_by_lang: Dict[Tuple[str, str], Tuple[Pipeline, List[str]]] = {}
 
-    # Phân loại các cột còn lại (ví dụ đơn giản dựa trên tên)
-    # Trong thực tế, có thể cần logic phức tạp hơn dựa trên dtype hoặc metadata
-    for col in remaining_cols:
-        # Ví dụ: nếu tên cột chứa 'SoLuong', 'Gia', 'ThanhTien' -> coi là số
-        if any(keyword in col.lower() for keyword in ['soluong', 'gia', 'thanhtien', 'number', 'amount', 'value']):
-            numerical_features.append(col)
+    for col, cfg in text_cols_config.items():
+        lang = cfg.get("language")
+        pipeline_steps = []
+        params = cfg.get("params", {}) # Lấy các tham số tùy chỉnh nếu có
+
+        # 1. Cleaning
+        cleaner_key = ("text", lang, "clean")
+        if cleaner_key in PROCESSOR_REGISTRY:
+            cleaner_params = params.get("cleaner", {}) # Tham số riêng cho cleaner
+            pipeline_steps.append(('clean', PROCESSOR_REGISTRY[cleaner_key](**cleaner_params)))
+
+        # 2. Tokenization
+        tokenizer_key = ("text", lang, "tokenize")
+        if tokenizer_key in PROCESSOR_REGISTRY:
+             tokenizer_params = params.get("tokenizer", {})
+             pipeline_steps.append(('tokenize', PROCESSOR_REGISTRY[tokenizer_key](**tokenizer_params)))
+
+        # 3. Stopwords (tùy chọn)
+        if cfg.get("remove_stopwords", False): # Cần key 'remove_stopwords' trong metadata
+             stopwords_key = ("text", lang, "stopwords")
+             if stopwords_key in PROCESSOR_REGISTRY:
+                 stopwords_params = params.get("stopwords", {})
+                 # Truyền custom_stopwords từ metadata nếu có
+                 custom_list = cfg.get("custom_stopwords")
+                 if custom_list: stopwords_params["custom_stopwords"] = custom_list
+                 processor_func = PROCESSOR_REGISTRY[stopwords_key]
+                 pipeline_steps.append(('stopwords', processor_func(stopwords_params)))
+
+        # 4. Vectorization (TF-IDF hoặc khác)
+        vectorizer_type = cfg.get("vectorizer", "tfidf") # Mặc định là tfidf
+        vectorizer_key = ("text", None, vectorizer_type) # Key chung cho vectorizer
+        if vectorizer_key in PROCESSOR_REGISTRY:
+            vectorizer_params = params.get("vectorizer", {})
+            # Truyền các tham số TFIDF từ metadata (ví dụ: max_features, ngram_range)
+            tfidf_cfg = {k:v for k,v in cfg.items() if k in ['max_features', 'ngram_range', 'min_df', 'max_df']}
+
+            # Đảm bảo giá trị 'ngram_range' trong tfidf_cfg là tuple nếu nó tồn tại
+            if 'ngram_range' in tfidf_cfg and isinstance(tfidf_cfg['ngram_range'], list):
+                logger.warning(f"Chuyển đổi 'ngram_range' từ list sang tuple cho cột '{col}'.")
+                tfidf_cfg['ngram_range'] = tuple(tfidf_cfg['ngram_range'])
+            # ----------------------
+
+            vectorizer_params.update(tfidf_cfg)
+            # TfidfVectorizerWrapper cần được fit trên cột của nó, không phải list cột
+            # Do đó, không thể dùng trực tiếp trong pipeline này nếu pipeline áp dụng cho nhiều cột
+            # Cần tách riêng bước vectorizer ra khỏi pipeline xử lý text chung?
+            # HOẶC: Thiết kế lại TfidfVectorizerWrapper để nhận pipeline text làm input?
+
+            # --> Cách tiếp cận đơn giản hơn: Mỗi cột text có pipeline riêng đến vectorizer
+            # Tạo pipeline hoàn chỉnh cho cột text này
+            text_pipeline_for_col = Pipeline(steps=pipeline_steps + [
+                ('vectorize', PROCESSOR_REGISTRY[vectorizer_key](vectorizer_params=vectorizer_params))
+            ])
+            # Thêm vào transformers chính, áp dụng cho cột này
+            transformers.append((f"text_{lang}_{col}", text_pipeline_for_col, [col]))
+            processed_columns.add(col)
+
         else:
-            # Mặc định coi các cột còn lại là categorical (cần xem xét kỹ)
-            other_categorical_features.append(col)
-
-    # --- Định nghĩa các bước biến đổi ---
-
-    # 1. Xử lý văn bản (TenHangHoaDichVu)
-    if 'TenHangHoaDichVu' in input_features:
-        text_pipeline = Pipeline([
-            ('preprocess', vietnamese_text_processor),
-            ('tfidf', TfidfVectorizer(max_features=TFIDF_MAX_FEATURES, ngram_range=(1, 2))) # xem xét thêm min_df, max_df
-        ])
-        transformers.append(('text_processing', text_pipeline, 'TenHangHoaDichVu'))
-        logger.info(f"Đã thêm pipeline xử lý text cho cột: TenHangHoaDichVu")
+            # Nếu chỉ có các bước tiền xử lý text mà không có vectorizer
+            # Có thể tạo pipeline chỉ chứa các bước đó nếu cần output text đã xử lý
+            if pipeline_steps:
+                 text_preprocessing_pipeline = Pipeline(steps=pipeline_steps)
+                 transformers.append((f"text_preprocess_{lang}_{col}", text_preprocessing_pipeline, [col]))
+                 processed_columns.add(col)
 
 
-    # 2. Xử lý Categorical đã biết (MSTNguoiBan, HachToan nếu có)
-    if categorical_features:
-        # Lọc ra các cột thực sự tồn tại trong input_features
-        valid_categorical_features = [col for col in categorical_features if col in input_features]
-        if valid_categorical_features:
-            categorical_encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False) # sparse=False có thể tốn bộ nhớ nếu nhiều feature
-            transformers.append(('categorical_known', categorical_encoder, valid_categorical_features))
-            logger.info(f"Đã thêm OneHotEncoder cho các cột: {valid_categorical_features}")
+    # --- Xử lý các cột NUMERICAL ---
+    numerical_cols_config = {
+        col: cfg for col, cfg in metadata_cols.items() if cfg.get("type") == "numerical"
+    }
+    numerical_cols = list(numerical_cols_config.keys())
+    if numerical_cols:
+        num_pipeline_steps = []
+        # 1. Imputation (tùy chọn)
+        # Kiểm tra xem có cột nào cần impute không (hoặc luôn thêm nếu có config)
+        impute_strategy = column_metadata.get("default_numerical_imputer", "median") # Lấy default từ root metadata
+        # Hoặc kiểm tra từng cột config
+        needs_impute = any(cfg.get("imputer_strategy") for cfg in numerical_cols_config.values())
+        if needs_impute or True: # Tạm thời luôn thêm imputer nếu có cột số
+             imputer_key = "numerical_imputer"
+             if imputer_key in PROCESSOR_REGISTRY:
+                 # Có thể cho phép override strategy cho từng cột, nhưng phức tạp hơn
+                 # Tạm dùng strategy chung
+                 imputer_params = {"strategy": impute_strategy}
+                 num_pipeline_steps.append(('imputer', PROCESSOR_REGISTRY[imputer_key](**imputer_params)))
+
+        # 2. Scaling (tùy chọn)
+        scaler_type = column_metadata.get("default_numerical_scaler", "standard")
+        needs_scale = any(cfg.get("scaler") for cfg in numerical_cols_config.values())
+        if needs_scale or True: # Tạm thời luôn thêm scaler
+            scaler_key = "numerical_scaler"
+            if scaler_key in PROCESSOR_REGISTRY:
+                 scaler_params = {"scaler_type": scaler_type}
+                 num_pipeline_steps.append(('scaler', PROCESSOR_REGISTRY[scaler_key](**scaler_params)))
+
+        if num_pipeline_steps:
+            numerical_pipeline = Pipeline(steps=num_pipeline_steps)
+            transformers.append(('numerical_processing', numerical_pipeline, numerical_cols))
+            processed_columns.update(numerical_cols)
 
 
-    # 3. Xử lý các cột Categorical khác (phát hiện được)
-    if other_categorical_features:
-        # Sử dụng OneHotEncoder cho các cột này, giả định số lượng không quá lớn
-        # Cân nhắc dùng FeatureHasher nếu số lượng giá trị unique lớn
-        other_categorical_encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
-        transformers.append(('categorical_other', other_categorical_encoder, other_categorical_features))
-        logger.info(f"Đã thêm OneHotEncoder cho các cột categorical khác: {other_categorical_features}")
+    # --- Xử lý các cột CATEGORICAL ---
+    categorical_cols_config = {
+        col: cfg for col, cfg in metadata_cols.items() if cfg.get("type") == "categorical"
+    }
+    # Nhóm theo chiến lược mã hóa
+    ohe_cols = [col for col, cfg in categorical_cols_config.items() if cfg.get("strategy", "onehot") == "onehot"]
+    hash_cols = [col for col, cfg in categorical_cols_config.items() if cfg.get("strategy") == "hashing"]
+
+    if ohe_cols:
+        ohe_key = "categorical_onehot"
+        if ohe_key in PROCESSOR_REGISTRY:
+            # Lấy tham số chung hoặc cho từng cột (hiện tại dùng chung)
+            ohe_params = {
+                "handle_unknown": column_metadata.get("default_categorical_handle_unknown", "ignore"),
+                "sparse_output": False # Đặt False để dễ dàng làm việc với DataFrame output
+            }
+            # Có thể đọc thêm min_frequency, max_categories từ metadata
+            transformers.append(('categorical_onehot', PROCESSOR_REGISTRY[ohe_key](**ohe_params), ohe_cols))
+            processed_columns.update(ohe_cols)
+
+    if hash_cols:
+        hash_key = "categorical_hashing"
+        if hash_key in PROCESSOR_REGISTRY:
+             # Lấy tham số chung hoặc cho từng cột
+             hash_params = {
+                 "n_features": column_metadata.get("default_hashing_n_features", 1024)
+             }
+             transformers.append(('categorical_hashing', PROCESSOR_REGISTRY[hash_key](**hash_params), hash_cols))
+             processed_columns.update(hash_cols)
+
+    # --- Xử lý các loại cột khác (ví dụ: datetime, ignore) ---
+    # ... (Thêm logic tương tự cho các type khác nếu cần) ...
+    ignored_cols = [col for col, cfg in metadata_cols.items() if cfg.get("type") == "ignore"]
+    processed_columns.update(ignored_cols) # Đánh dấu là đã xử lý (bằng cách bỏ qua)
 
 
-    # 4. Xử lý các cột Số (phát hiện được)
-    if numerical_features:
-        numerical_transformer = StandardScaler() # Hoặc MinMaxScaler
-        transformers.append(('numerical', numerical_transformer, numerical_features))
-        logger.info(f"Đã thêm StandardScaler cho các cột số: {numerical_features}")
+    # --- Xây dựng ColumnTransformer cuối cùng ---
+    # remainder='passthrough' để giữ lại các cột không được định nghĩa trong metadata
+    # hoặc 'drop' nếu muốn loại bỏ chúng
+    remainder_strategy = column_metadata.get("remainder_strategy", "passthrough")
+
+    # Kiểm tra xem có transformer nào được tạo không
+    if not transformers:
+        logger.warning("Không có transformers nào được tạo từ metadata. Preprocessor sẽ không làm gì.")
+        # Trả về một transformer 'rỗng' nếu không có gì để xử lý
+        # Hoặc có thể raise lỗi tùy theo yêu cầu
+        # Sử dụng FunctionTransformer không làm gì cả
+        def no_op(X): return X
+        return FunctionTransformer(no_op, validate=False)
 
 
-    # --- Tạo ColumnTransformer ---
     preprocessor = ColumnTransformer(
         transformers=transformers,
-        remainder='drop' # Bỏ qua các cột không được xử lý rõ ràng
-                         # Hoặc 'passthrough' nếu muốn giữ lại (cẩn thận với kiểu dữ liệu)
+        remainder=remainder_strategy,
+        verbose_feature_names_out=False # Tránh tên cột dài dòng từ ColumnTransformer
     )
+    # preprocessor.set_output(transform="pandas") # Yêu cầu output là DataFrame (sklearn >= 1.2)
 
-    logger.info(f"Đã tạo ColumnTransformer với {len(transformers)} bộ biến đổi.")
+    logger.info(f"Đã xây dựng preprocessor động với {len(transformers)} bộ xử lý.")
+    logger.debug(f"Các cột đã được xử lý: {processed_columns}")
+    logger.debug(f"Chiến lược remainder: {remainder_strategy}")
+
     return preprocessor
-
-# --- Hàm tiện ích để tạo các preprocessor cụ thể ---
-
-def create_hachtoan_preprocessor(all_input_features: List[str]) -> ColumnTransformer:
-    """Tạo preprocessor cho mô hình dự đoán HachToan."""
-    logger.info("Tạo preprocessor cho mô hình HachToan...")
-    # Loại bỏ các cột target khỏi danh sách input cho preprocessor
-    features_for_hachtoan = [
-        f for f in all_input_features
-        if f not in [TARGET_HACHTOAN, TARGET_MAHANGHOA]
-    ]
-    logger.info(f"Features sử dụng cho HachToan preprocessor: {features_for_hachtoan}")
-    return create_preprocessor(features_for_hachtoan, include_hachtoan_input=False)
-
-def create_mahanghoa_preprocessor(all_input_features: List[str]) -> ColumnTransformer:
-    """Tạo preprocessor cho mô hình dự đoán MaHangHoa."""
-    logger.info("Tạo preprocessor cho mô hình MaHangHoa...")
-    # Bao gồm HachToan làm input, loại bỏ target MaHangHoa
-    features_for_mahanghoa = [
-        f for f in all_input_features
-        if f != TARGET_MAHANGHOA # Giữ lại HachToan nếu có
-    ]
-    # Đảm bảo HachToan có trong list nếu nó tồn tại trong dataframe gốc
-    if TARGET_HACHTOAN not in features_for_mahanghoa and TARGET_HACHTOAN in all_input_features:
-         features_for_mahanghoa.append(TARGET_HACHTOAN)
-
-    logger.info(f"Features sử dụng cho MaHangHoa preprocessor: {features_for_mahanghoa}")
-    return create_preprocessor(features_for_mahanghoa, include_hachtoan_input=True)

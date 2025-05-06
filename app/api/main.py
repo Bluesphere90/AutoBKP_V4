@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 # --- Project Imports ---
-from app.api.endpoints import training, prediction # Import các modules chứa router
+from app.api.endpoints import training, prediction, column_config # Import các modules chứa router
 from app.core.config import API_TITLE, API_DESCRIPTION, API_VERSION
 
 # --- Khởi tạo FastAPI App ---
@@ -18,10 +18,10 @@ app = FastAPI(
 )
 
 # --- Gắn các Routers ---
-# Bao gồm router cho training endpoints với prefix /training
 app.include_router(training.router, prefix="/training", tags=["Training"])
-# Bao gồm router cho prediction endpoints với prefix /prediction
 app.include_router(prediction.router, prefix="/prediction", tags=["Prediction"])
+# Thêm router quản lý cấu hình cột
+app.include_router(column_config.router, prefix="/config", tags=["Configuration"])
 
 # --- Endpoint gốc (Optional) ---
 @app.get("/", include_in_schema=False)

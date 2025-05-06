@@ -25,11 +25,13 @@ METADATA_FILENAME_PREFIX = "metadata_" # Thêm prefix cho metadata
 PREPROCESSOR_HACHTOAN_FILENAME = "preprocessor_hachtoan.joblib"
 PREPROCESSOR_MAHANGHOA_FILENAME = "preprocessor_mahanghoa.joblib"
 HACHTOAN_MODEL_FILENAME = "hachtoan_model.joblib"
-MAHANGHOA_MODEL_FILENAME = "mahanghoa_model.joblib"
+MAHANGHOA_MODEL_FILENAME = "mahanghoa_model.joblib" # Model MH dựa trên HachToan=15*
+MAHANGHOA_DIRECT_MODEL_FILENAME = "mahanghoa_direct_model.joblib" # <-- Tên file model MH mới
 HACHTOAN_ENCODER_FILENAME = "hachtoan_encoder.joblib"
-MAHANGHOA_ENCODER_FILENAME = "mahanghoa_encoder.joblib"
-OUTLIER_DETECTOR_1_FILENAME = "outlier_detector_1.joblib"
-OUTLIER_DETECTOR_2_FILENAME = "outlier_detector_2.joblib"
+MAHANGHOA_ENCODER_FILENAME = "mahanghoa_encoder.joblib" # Dùng chung encoder cho cả 2 model MH
+OUTLIER_DETECTOR_1_FILENAME = "outlier_detector_1.joblib" # Dùng cho input của model HT và MH Direct
+OUTLIER_DETECTOR_2_FILENAME = "outlier_detector_2.joblib" # Dùng cho input của model MH (có HachToan)
+# OUTLIER_DETECTOR_3_FILENAME = "outlier_detector_3.joblib" # Có thể tạo riêng nếu cần, tạm dùng chung OD1
 LABEL_ENCODERS_DIR = "label_encoders"
 
 # --- Column Names ---
@@ -92,3 +94,37 @@ VALIDATION_SET_SIZE = float(os.getenv("VALIDATION_SET_SIZE", 0.2)) # Thêm cấu
 API_TITLE = "HachToan & MaHangHoa Prediction API"
 API_DESCRIPTION = "API for training and predicting HachToan and MaHangHoa using ML."
 API_VERSION = "0.1.0"
+
+# --- Column Configuration Enums ---
+# Định nghĩa các loại cột được hỗ trợ
+class SupportedColumnType(str, Enum):
+    TEXT = "text"
+    CATEGORICAL = "categorical"
+    NUMERICAL = "numerical"
+    DATETIME = "datetime" # Ví dụ thêm datetime
+    IGNORE = "ignore"     # Để bỏ qua cột
+
+# Định nghĩa các ngôn ngữ được hỗ trợ (cho xử lý text)
+class SupportedLanguage(str, Enum):
+    VIETNAMESE = "vi"
+    ENGLISH = "en"
+    NONE = "none" # Cho text không cần xử lý ngôn ngữ cụ thể
+
+# Định nghĩa các chiến lược mã hóa categorical
+class CategoricalStrategy(str, Enum):
+    ONEHOT = "onehot"
+    HASHING = "hashing"
+    # TARGET = "target" # Ví dụ thêm target encoding
+
+# Định nghĩa các chiến lược xử lý số
+class NumericalStrategy(str, Enum):
+    STANDARD_SCALER = "standard"
+    MINMAX_SCALER = "minmax"
+    MEDIAN_IMPUTER = "median"
+    MEAN_IMPUTER = "mean"
+
+# Định nghĩa các chiến lược vector hóa text
+class TextVectorizerStrategy(str, Enum):
+    TFIDF = "tfidf"
+    # HASHING = "hashing" # Có thể dùng HashingVectorizer cho text
+    # EMBEDDING = "embedding" # Ví dụ
