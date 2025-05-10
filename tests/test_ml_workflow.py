@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 import json
 import os
+import numpy as np
 
 # Import các hàm cần test từ module ml
 from app.ml.data_handler import prepare_prediction_data
@@ -175,13 +176,40 @@ def test_training_and_prediction_workflow(mock_config, client_id):
     print("\n--- Testing Predictions after Initial Training ---")
     # 2.1 Test predict_combined
     prediction_df_base = prepare_prediction_data(SAMPLE_PREDICTION_INPUT)
-    assert isinstance(prediction_df_base, pd.DataFrame) and not prediction_df_base.empty, "Prepare prediction data failed"
+    assert isinstance(prediction_df_base,
+                      pd.DataFrame) and not prediction_df_base.empty, "Prepare prediction data failed"
     print(f"Predicting combined for {len(prediction_df_base)} items.")
+
+    # Chuyển đổi tất cả các cột sang kiểu Python built-in trước khi dự đoán
+    for col in prediction_df_base.columns:
+        # Kiểm tra và xử lý nếu có cột là numpy array
+        if any(isinstance(x, np.ndarray) for x in prediction_df_base[col].values):
+            print(f"Chuyển đổi cột {col} từ NumPy array sang string")
+            prediction_df_base[col] = prediction_df_base[col].apply(
+                lambda x: str(x.tolist()) if isinstance(x, np.ndarray) else str(x)
+            )
+        elif pd.api.types.is_numeric_dtype(prediction_df_base[col]):
+            print(f"Chuyển đổi cột số {col} sang Python native types")
+            prediction_df_base[col] = prediction_df_base[col].astype(float).tolist()
+        else:
+            # Đảm bảo các cột khác đều là string
+            prediction_df_base[col] = prediction_df_base[col].astype(str)
+
+    # Thực hiện dự đoán
     predictions_combined = predict_combined(client_id, prediction_df_base.copy())
     assert isinstance(predictions_combined, list), "predict_combined did not return a list"
-    assert len(predictions_combined) == len(SAMPLE_PREDICTION_INPUT), f"Expected {len(SAMPLE_PREDICTION_INPUT)} combined predictions, got {len(predictions_combined)}"
+    assert len(predictions_combined) == len(
+        SAMPLE_PREDICTION_INPUT), f"Expected {len(SAMPLE_PREDICTION_INPUT)} combined predictions, got {len(predictions_combined)}"
     print("Sample combined predictions:", predictions_combined[:1])
-    # ... (Thêm assert chi tiết nếu cần)
+
+    # Kiểm tra chi tiết kết quả
+    for result in predictions_combined:
+        assert isinstance(result, dict), "Prediction result should be a dictionary"
+        # Kiểm tra các trường bắt buộc
+        assert "is_outlier_input1" in result, "Missing is_outlier_input1 field"
+        assert "is_outlier_input2" in result, "Missing is_outlier_input2 field"
+        assert isinstance(result["is_outlier_input1"], bool), "is_outlier_input1 should be a boolean"
+        assert isinstance(result["is_outlier_input2"], bool), "is_outlier_input2 should be a boolean"
 
     # 2.2 Test predict_hachtoan_only
     print(f"Predicting hachtoan_only for {len(prediction_df_base)} items.")

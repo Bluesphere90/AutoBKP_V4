@@ -136,15 +136,20 @@ def check_outlier(detector: Optional[IsolationForest], data: np.ndarray) -> List
     try:
         # predict trả về 1 cho inliers, -1 cho outliers
         predictions = detector.predict(data)
-        # Chuyển đổi sang boolean: True nếu là outlier (-1), False nếu là inlier (1)
-        # Chuyển đổi sang boolean chuẩn của Python
 
+        # Chuyển đổi sang list Python trước khi xử lý
+        if isinstance(predictions, np.ndarray):
+            predictions = predictions.tolist()
+
+        # Chuyển đổi sang boolean: True nếu là outlier (-1), False nếu là inlier (1)
         is_outlier = [bool(pred == -1) for pred in predictions]
         num_outliers = sum(is_outlier)
+
         if num_outliers > 0:
-             logger.info(f"Phát hiện {num_outliers}/{len(is_outlier)} điểm dữ liệu là outlier.")
+            logger.info(f"Phát hiện {num_outliers}/{len(is_outlier)} điểm dữ liệu là outlier.")
         else:
-             logger.debug("Không phát hiện outlier nào trong batch dữ liệu này.")
+            logger.debug("Không phát hiện outlier nào trong batch dữ liệu này.")
+
         return is_outlier
     except Exception as e:
         logger.error(f"Lỗi khi dự đoán outlier: {e}", exc_info=True)

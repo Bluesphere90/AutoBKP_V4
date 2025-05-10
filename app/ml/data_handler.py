@@ -1,5 +1,5 @@
 # app/ml/data_handler.py
-
+import numpy as np
 import pandas as pd
 import logging
 from pathlib import Path
@@ -52,11 +52,19 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame: # Chỉ cần df làm in
             logger.warning(f"Đã loại bỏ {dropped_count} hàng do thiếu giá trị target trong cột: ['{target_hachtoan}']")
 
         # Đảm bảo kiểu dữ liệu string cho HachToan
-        if target_hachtoan in df.columns: # Kiểm tra lại sau dropna
-             try:
-                 df[target_hachtoan] = df[target_hachtoan].astype(str)
-             except Exception as e:
-                  logger.warning(f"Không thể chuyển cột target '{target_hachtoan}' sang str: {e}.")
+        if target_hachtoan in df.columns:  # Kiểm tra lại sau dropna
+            try:
+                # Xử lý trường hợp có giá trị NumPy array
+                if any(isinstance(x, np.ndarray) for x in df[target_hachtoan].values):
+                    logger.warning(
+                        f"Phát hiện giá trị NumPy array trong cột '{target_hachtoan}'. Chuyển đổi từng phần tử.")
+                    df[target_hachtoan] = df[target_hachtoan].apply(
+                        lambda x: str(x.tolist()) if isinstance(x, np.ndarray) else str(x)
+                    )
+                else:
+                    df[target_hachtoan] = df[target_hachtoan].astype(str)
+            except Exception as e:
+                logger.warning(f"Không thể chuyển cột target '{target_hachtoan}' sang str: {e}.")
     else:
         # Nếu cột HachToan không tồn tại, đây là lỗi nghiêm trọng đã được check ở load_training_data
         logger.error(f"Cột target bắt buộc '{target_hachtoan}' không có trong DataFrame tại bước làm sạch.")
