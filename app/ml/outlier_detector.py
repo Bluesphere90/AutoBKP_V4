@@ -113,8 +113,10 @@ def check_outlier(detector: Optional[IsolationForest], data: np.ndarray) -> List
         Trả về list [False] * n nếu detector không tồn tại hoặc có lỗi.
     """
     if detector is None:
-        logger.warning("Outlier detector chưa được huấn luyện hoặc không thể tải. Mặc định coi tất cả không phải outlier.")
-        if data is None: return []
+        logger.warning(
+            "Outlier detector chưa được huấn luyện hoặc không thể tải. Mặc định coi tất cả không phải outlier.")
+        if data is None:
+            return []
         return [False] * data.shape[0]
 
     if data is None or data.shape[0] == 0:
@@ -122,35 +124,50 @@ def check_outlier(detector: Optional[IsolationForest], data: np.ndarray) -> List
         return []
 
     # Chuyển đổi sang dense nếu cần (nhất quán với lúc train)
+    dense_data = None
     if hasattr(data, "toarray"):
         logger.debug("Chuyển đổi sparse matrix sang dense array để dự đoán outlier.")
         try:
-            data = data.toarray()
+            dense_data = data.toarray()
         except MemoryError:
-            logger.error("Không đủ bộ nhớ để chuyển đổi sparse matrix sang dense cho dự đoán outlier. Mặc định không phải outlier.")
+            logger.error(
+                "Không đủ bộ nhớ để chuyển đổi sparse matrix sang dense cho dự đoán outlier. Mặc định không phải outlier.")
             return [False] * data.shape[0]
         except Exception as e:
-             logger.error(f"Lỗi khi chuyển đổi sparse matrix cho dự đoán outlier: {e}. Mặc định không phải outlier.", exc_info=True)
-             return [False] * data.shape[0]
+            logger.error(f"Lỗi khi chuyển đổi sparse matrix cho dự đoán outlier: {e}. Mặc định không phải outlier.",
+                         exc_info=True)
+            return [False] * data.shape[0]
+    else:
+        dense_data = data
 
     try:
         # predict trả về 1 cho inliers, -1 cho outliers
-        predictions = detector.predict(data)
+        predictions = detector.predict(dense_data)
 
-        # Chuyển đổi sang list Python trước khi xử lý
+        # Chuyển đổi predictions từ NumPy array sang Python list nếu cần
         if isinstance(predictions, np.ndarray):
-            predictions = predictions.tolist()
+            predictions_list = predictions.tolist()
+        else:
+            predictions_list = predictions
 
         # Chuyển đổi sang boolean: True nếu là outlier (-1), False nếu là inlier (1)
-        is_outlier = [bool(pred == -1) for pred in predictions]
-        num_outliers = sum(is_outlier)
+        is_outlier = []
+        for pred in predictions_list:
+            # Xử lý các trường hợp đặc biệt
+            if isinstance(pred, np.generic):
+                # Chuyển NumPy scalar sang Python scalar
+                pred = pred.item()
+            # Chuyển sang bool Python chuẩn
+            is_outlier.append(bool(pred == -1))
 
+        num_outliers = sum(is_outlier)
         if num_outliers > 0:
             logger.info(f"Phát hiện {num_outliers}/{len(is_outlier)} điểm dữ liệu là outlier.")
         else:
             logger.debug("Không phát hiện outlier nào trong batch dữ liệu này.")
 
         return is_outlier
+
     except Exception as e:
         logger.error(f"Lỗi khi dự đoán outlier: {e}", exc_info=True)
         # Trả về False cho tất cả nếu có lỗi

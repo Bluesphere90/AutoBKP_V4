@@ -679,105 +679,206 @@ def predict_combined(client_id: str, input_data: pd.DataFrame) -> List[Dict[str,
     od2 = components["outlier_detector_2"]
 
     n_items = len(input_data)
-    results = [{} for _ in range(n_items)] # Khởi tạo list kết quả
+    results = [{} for _ in range(n_items)]  # Khởi tạo list kết quả
 
     # --- Bước 1: Dự đoán HachToan ---
-    y_pred_ht = [None]*n_items; prob_ht = [None]*n_items; flags_od1 = [False]*n_items; err_ht = [None]*n_items
+    y_pred_ht = [None] * n_items
+    prob_ht = [None] * n_items
+    flags_od1 = [False] * n_items
+    err_ht = [None] * n_items
+
     if not preprocessor_ht or not encoder_ht:
-        for i in range(n_items): results[i].update({"error": "Thiếu thành phần HT."})
+        for i in range(n_items):
+            results[i].update({"error": "Thiếu thành phần HT."})
     else:
         try:
+            # Xử lý input data
             expected_cols_ht = getattr(preprocessor_ht, 'feature_names_in_', None)
-            if expected_cols_ht: input_data_aligned_ht = input_data.reindex(columns=expected_cols_ht, fill_value="")
-            else: input_data_aligned_ht = input_data
+            if expected_cols_ht:
+                input_data_aligned_ht = input_data.reindex(columns=expected_cols_ht, fill_value="")
+            else:
+                input_data_aligned_ht = input_data
+
+            # Transform input
             X_transformed_ht = preprocessor_ht.transform(input_data_aligned_ht)
-            if od1: flags_od1 = check_outlier(od1, X_transformed_ht)
+
+            # Kiểm tra outlier
+            if od1:
+                try:
+                    flags_od1 = check_outlier(od1, X_transformed_ht)
+                except Exception as e:
+                    logger.error(f"Lỗi khi kiểm tra outlier: {e}", exc_info=True)
+                    flags_od1 = [False] * n_items
+
+            # Dự đoán
             if model_ht:
                 try:
                     pred_enc = model_ht.predict(X_transformed_ht)
                     probs = model_ht.predict_proba(X_transformed_ht)
+
+                    # Chuyển từ NumPy array sang Python list
+                    if isinstance(pred_enc, np.ndarray):
+                        pred_enc = pred_enc.tolist()
+                    if isinstance(probs, np.ndarray):
+                        probs = probs.tolist()
+                    elif scipy.sparse.issparse(probs):
+                        probs = probs.toarray().tolist()
+
+                    # Lấy nhãn và xác suất
                     y_pred_ht = encoder_ht.inverse_transform(pred_enc)
-                    prob_ht = np.max(probs, axis=1).tolist()  # Chuyển thành Python list
+                    if isinstance(y_pred_ht, np.ndarray):
+                        y_pred_ht = y_pred_ht.tolist()
+
+                    # Lấy xác suất cao nhất cho mỗi dự đoán
+                    prob_ht = []
+                    for prob_row in probs:
+                        max_prob = max(prob_row) if prob_row else None
+                        if isinstance(max_prob, np.generic):
+                            max_prob = max_prob.item()  # Chuyển NumPy scalar sang Python scalar
+                        prob_ht.append(max_prob)
+
                 except Exception as e:
                     logger.error(f"Client {client_id}: Lỗi khi dự đoán HT: {e}", exc_info=True)
                     err_ht = [f"Lỗi dự đoán HT: {e}"] * n_items
-            elif len(encoder_ht.classes_) == 1:
+                    y_pred_ht = [None] * n_items
+                    prob_ht = [None] * n_items
+            elif encoder_ht and len(encoder_ht.classes_) == 1:
                 y_pred_ht = [encoder_ht.classes_[0]] * n_items
                 prob_ht = [1.0] * n_items
             else:
                 err_ht = ["Lỗi: Model HT không tồn tại"] * n_items
-        except Exception as e: err_ht = [f"Lỗi dự đoán HT: {e}"]*n_items
+        except Exception as e:
+            logger.error(f"Client {client_id}: Lỗi chung khi dự đoán HT: {e}", exc_info=True)
+            err_ht = [f"Lỗi dự đoán HT: {e}"] * n_items
 
     # Gán kết quả bước 1
     for i in range(n_items):
-        p_ht = prob_ht[i] if i < len(prob_ht) and prob_ht[i] is not None else None # Kiểm tra index và None
-        if isinstance(p_ht, np.float64): p_ht = float(p_ht)
+        p_ht = None
+        if i < len(prob_ht) and prob_ht[i] is not None:
+            p_ht = prob_ht[i]
+            # Chuyển NumPy float thành Python float
+            if isinstance(p_ht, (np.float64, np.float32, np.float16)):
+                p_ht = float(p_ht)
+
         results[i].update({
             config.TARGET_HACHTOAN: y_pred_ht[i] if i < len(y_pred_ht) else None,
             f"{config.TARGET_HACHTOAN}_prob": p_ht,
-            config.TARGET_MAHANGHOA: None, f"{config.TARGET_MAHANGHOA}_prob": None,
+            config.TARGET_MAHANGHOA: None,
+            f"{config.TARGET_MAHANGHOA}_prob": None,
             "is_outlier_input1": flags_od1[i] if i < len(flags_od1) else False,
-            "is_outlier_input2": False, "error": err_ht[i] if i < len(err_ht) else None
+            "is_outlier_input2": False,
+            "error": err_ht[i] if i < len(err_ht) else None
         })
 
     # --- Bước 2: Dự đoán MaHangHoa (nếu cần và có thể) ---
-    indices_to_predict_mh = [i for i, r in enumerate(results) if r[config.TARGET_HACHTOAN] and isinstance(r[config.TARGET_HACHTOAN], str) and r[config.TARGET_HACHTOAN].startswith(config.HACHTOAN_PREFIX_FOR_MAHANGHOA)]
+    indices_to_predict_mh = []
+    for i, r in enumerate(results):
+        if (r[config.TARGET_HACHTOAN] and
+                isinstance(r[config.TARGET_HACHTOAN], str) and
+                r[config.TARGET_HACHTOAN].startswith(config.HACHTOAN_PREFIX_FOR_MAHANGHOA)):
+            indices_to_predict_mh.append(i)
+
     if indices_to_predict_mh and preprocessor_mh and model_mh and encoder_mh:
         logger.info(f"Dự đoán MaHangHoa (dependent) cho {len(indices_to_predict_mh)} bản ghi.")
         input_list_mh = []
+
         for i in indices_to_predict_mh:
-             try:
-                 input_dict = input_data.iloc[i].to_dict()
-                 input_dict[config.TARGET_HACHTOAN] = results[i][config.TARGET_HACHTOAN]
-                 input_list_mh.append(input_dict)
-             except IndexError: results[i]["error"] = (results[i]["error"] or "") + "; Lỗi lấy data gốc cho MH"
+            try:
+                input_dict = input_data.iloc[i].to_dict()
+                input_dict[config.TARGET_HACHTOAN] = results[i][config.TARGET_HACHTOAN]
+                input_list_mh.append(input_dict)
+            except IndexError:
+                results[i]["error"] = (results[i]["error"] or "") + "; Lỗi lấy data gốc cho MH"
 
         if input_list_mh:
             try:
                 input_df_mh = pd.DataFrame(input_list_mh)
                 expected_cols_mh = getattr(preprocessor_mh, 'feature_names_in_', None)
-                if expected_cols_mh: input_df_mh_aligned = input_df_mh.reindex(columns=expected_cols_mh, fill_value="")
-                else: input_df_mh_aligned = input_df_mh
+
+                if expected_cols_mh:
+                    input_df_mh_aligned = input_df_mh.reindex(columns=expected_cols_mh, fill_value="")
+                else:
+                    input_df_mh_aligned = input_df_mh
+
+                # Transform input
                 X_transformed_mh = preprocessor_mh.transform(input_df_mh_aligned)
 
-                flags_od2 = [False]*len(input_df_mh); err_mh = [None]*len(input_df_mh)
-                if od2: flags_od2 = check_outlier(od2, X_transformed_mh)
+                # Kiểm tra outlier
+                flags_od2 = [False] * len(input_df_mh)
+                err_mh = [None] * len(input_df_mh)
 
+                if od2:
+                    try:
+                        flags_od2 = check_outlier(od2, X_transformed_mh)
+                        if isinstance(flags_od2, np.ndarray):
+                            flags_od2 = flags_od2.tolist()
+                    except Exception as e:
+                        logger.error(f"Lỗi khi kiểm tra outlier MH: {e}", exc_info=True)
+                        flags_od2 = [False] * len(input_df_mh)
+
+                # Dự đoán MaHangHoa
                 try:
                     pred_enc_mh = model_mh.predict(X_transformed_mh)
                     probs_mh = model_mh.predict_proba(X_transformed_mh)
-                    y_pred_mh_batch = encoder_mh.inverse_transform(pred_enc_mh)
-                    prob_mh_batch = np.max(probs_mh, axis=1).tolist()  # Chuyển thành Python list
 
+                    # Chuyển từ NumPy array sang Python list
+                    if isinstance(pred_enc_mh, np.ndarray):
+                        pred_enc_mh = pred_enc_mh.tolist()
+                    if isinstance(probs_mh, np.ndarray):
+                        probs_mh = probs_mh.tolist()
+                    elif scipy.sparse.issparse(probs_mh):
+                        probs_mh = probs_mh.toarray().tolist()
+
+                    # Lấy nhãn
+                    y_pred_mh_batch = encoder_mh.inverse_transform(pred_enc_mh)
+                    if isinstance(y_pred_mh_batch, np.ndarray):
+                        y_pred_mh_batch = y_pred_mh_batch.tolist()
+
+                    # Lấy xác suất cao nhất cho mỗi dự đoán
+                    prob_mh_batch = []
+                    for prob_row in probs_mh:
+                        max_prob = max(prob_row) if prob_row else None
+                        if isinstance(max_prob, np.generic):
+                            max_prob = max_prob.item()
+                        prob_mh_batch.append(max_prob)
+
+                    # Gán kết quả
                     for idx, original_index in enumerate(indices_to_predict_mh):
-                        if idx < len(y_pred_mh_batch):  # Kiểm tra index
-                            p_mh = prob_mh_batch[idx] if idx < len(prob_mh_batch) and prob_mh_batch[
-                                idx] is not None else None
-                            if isinstance(p_mh, np.float64): p_mh = float(p_mh)
+                        if idx < len(y_pred_mh_batch):
+                            p_mh = None
+                            if idx < len(prob_mh_batch) and prob_mh_batch[idx] is not None:
+                                p_mh = prob_mh_batch[idx]
+                                if isinstance(p_mh, (np.float64, np.float32, np.float16)):
+                                    p_mh = float(p_mh)
+
                             results[original_index][config.TARGET_MAHANGHOA] = y_pred_mh_batch[idx]
                             results[original_index][f"{config.TARGET_MAHANGHOA}_prob"] = p_mh
                             results[original_index]["is_outlier_input2"] = flags_od2[idx] if idx < len(
                                 flags_od2) else False
-                            if idx < len(err_mh) and err_mh[idx]: results[original_index]["error"] = (results[
-                                                                                                          original_index][
-                                                                                                          "error"] or "") + f"; Lỗi MH: {err_mh[idx]}"
+
+                            if idx < len(err_mh) and err_mh[idx]:
+                                results[original_index]["error"] = (results[original_index][
+                                                                        "error"] or "") + f"; Lỗi MH: {err_mh[idx]}"
                         else:
                             logger.error(f"Index mismatch khi gộp MH: idx={idx}")
+
                 except Exception as e:
-                    logger.error(f"Client {client_id}: Lỗi khi dự đoán batch MH: {e}", exc_info=True)
+                    logger.error(f"Client {client_id}: Lỗi khi dự đoán MH batch: {e}", exc_info=True)
                     for i in indices_to_predict_mh:
                         results[i]["error"] = (results[i]["error"] or "") + f"; Lỗi batch MH: {e}"
 
             except Exception as e:
-                 logger.error(f"Client {client_id}: Lỗi khi xử lý batch MaHangHoa (dependent): {e}", exc_info=True)
-                 for i in indices_to_predict_mh: results[i]["error"] = (results[i]["error"] or "") + f"; Lỗi batch MH: {e}"
+                logger.error(f"Client {client_id}: Lỗi khi xử lý batch MaHangHoa (dependent): {e}", exc_info=True)
+                for i in indices_to_predict_mh:
+                    results[i]["error"] = (results[i]["error"] or "") + f"; Lỗi batch MH: {e}"
+
     elif indices_to_predict_mh:
-         logger.warning("Không thể dự đoán MH (dependent) do thiếu thành phần.")
-         for i in indices_to_predict_mh: results[i]["error"] = (results[i]["error"] or "") + "; Thiếu model MH (dependent)"
+        logger.warning(f"Không thể dự đoán MH (dependent) do thiếu thành phần.")
+        for i in indices_to_predict_mh:
+            results[i]["error"] = (results[i]["error"] or "") + "; Thiếu model MH (dependent)"
 
     logger.info(f"Dự đoán kết hợp hoàn tất cho client {client_id}.")
     return results
-
 
 # --- Hàm dự đoán chỉ HachToan ---
 def predict_hachtoan_only(client_id: str, input_data: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -790,45 +891,102 @@ def predict_hachtoan_only(client_id: str, input_data: pd.DataFrame) -> List[Dict
     od1 = components["outlier_detector_1"]
 
     if not preprocessor_ht or not encoder_ht:
-        return [{"error": "Thiếu thành phần model HachToan cơ bản."}] * len(input_data)
+        return [{"HachToan": None, "HachToan_prob": None, "is_outlier_input1": False,
+                 "error": "Thiếu thành phần model HachToan cơ bản."}] * len(input_data)
 
-    results_list = []
     n_items = len(input_data)
-    y_pred_ht=[None]*n_items; probabilities_ht=[None]*n_items; outlier_flags_1=[False]*n_items; errors_ht=[None]*n_items
+    results_list = []
+    y_pred_ht = [None] * n_items
+    probabilities_ht = [None] * n_items
+    outlier_flags_1 = [False] * n_items
+    errors_ht = [None] * n_items
+
     try:
+        # Căn chỉnh cột dữ liệu đầu vào
         expected_cols = getattr(preprocessor_ht, 'feature_names_in_', None)
-        if expected_cols: input_data_aligned = input_data.reindex(columns=expected_cols, fill_value="")
-        else: input_data_aligned = input_data
+        if expected_cols:
+            input_data_aligned = input_data.reindex(columns=expected_cols, fill_value="")
+        else:
+            input_data_aligned = input_data
+
+        # Transform dữ liệu
         X_transformed = preprocessor_ht.transform(input_data_aligned)
-        if od1: outlier_flags_1 = check_outlier(od1, X_transformed)
+
+        # Kiểm tra outlier
+        if od1:
+            try:
+                flags = check_outlier(od1, X_transformed)
+                if isinstance(flags, np.ndarray):
+                    outlier_flags_1 = flags.tolist()
+                else:
+                    outlier_flags_1 = flags
+            except Exception as e:
+                logger.error(f"Lỗi khi kiểm tra outlier: {e}", exc_info=True)
+                outlier_flags_1 = [False] * n_items
+
+        # Dự đoán
         if model_ht:
             try:
+                # Dự đoán và lấy xác suất
                 pred_enc = model_ht.predict(X_transformed)
                 probs = model_ht.predict_proba(X_transformed)
+
+                # Chuyển từ NumPy array sang list
+                if isinstance(pred_enc, np.ndarray):
+                    pred_enc = pred_enc.tolist()
+                if isinstance(probs, np.ndarray):
+                    probs = probs.tolist()
+                elif scipy.sparse.issparse(probs):
+                    probs = probs.toarray().tolist()
+
+                # Lấy nhãn và xác suất
                 y_pred_ht = encoder_ht.inverse_transform(pred_enc)
-                probabilities_ht = np.max(probs, axis=1).tolist()  # Chuyển thành Python list
+                if isinstance(y_pred_ht, np.ndarray):
+                    y_pred_ht = y_pred_ht.tolist()
+
+                # Lấy xác suất lớn nhất cho mỗi dự đoán
+                probabilities_ht = []
+                for prob_row in probs:
+                    max_prob = max(prob_row) if prob_row else None
+                    if isinstance(max_prob, np.generic):
+                        max_prob = max_prob.item()  # Chuyển NumPy scalar sang Python scalar
+                    probabilities_ht.append(max_prob)
+
             except Exception as e:
-                logger.error(f"Client {client_id}: Lỗi khi dự đoán HT: {e}", exc_info=True)
+                logger.error(f"Client {client_id}: Lỗi khi dự đoán HachToan: {e}", exc_info=True)
                 errors_ht = [f"Lỗi dự đoán HachToan: {e}"] * n_items
-        elif len(encoder_ht.classes_) == 1:
+                y_pred_ht = [None] * n_items
+                probabilities_ht = [None] * n_items
+
+        elif encoder_ht and len(encoder_ht.classes_) == 1:
             y_pred_ht = [encoder_ht.classes_[0]] * n_items
             probabilities_ht = [1.0] * n_items
         else:
             errors_ht = ["Lỗi: Model HT không tồn tại"] * n_items
-    except Exception as e: errors_ht = [f"Lỗi dự đoán HachToan: {e}"]*n_items
 
+    except Exception as e:
+        logger.error(f"Client {client_id}: Lỗi chung trong dự đoán HachToan: {e}", exc_info=True)
+        errors_ht = [f"Lỗi dự đoán HachToan: {e}"] * n_items
+
+    # Tạo kết quả
     for i in range(n_items):
-        prob = probabilities_ht[i] if i < len(probabilities_ht) and probabilities_ht[i] is not None else None
+        prob = None
+        if i < len(probabilities_ht) and probabilities_ht[i] is not None:
+            prob = probabilities_ht[i]
+            # Đảm bảo là Python float native
+            if isinstance(prob, (np.float64, np.float32, np.float16)):
+                prob = float(prob)
+
         err = errors_ht[i] if i < len(errors_ht) else None
-        if isinstance(prob, np.float64): prob = float(prob)
+
         results_list.append({
             "HachToan": y_pred_ht[i] if i < len(y_pred_ht) else None,
             "HachToan_prob": prob,
             "is_outlier_input1": outlier_flags_1[i] if i < len(outlier_flags_1) else False,
             "error": err
         })
-    return results_list
 
+    return results_list
 
 # --- Hàm dự đoán chỉ MaHangHoa (khi biết HachToan) ---
 def predict_mahanghoa_only(client_id: str, input_data_with_hachtoan: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -841,97 +999,217 @@ def predict_mahanghoa_only(client_id: str, input_data_with_hachtoan: pd.DataFram
     od2 = components["outlier_detector_2"]
 
     if not preprocessor_mh or not encoder_mh:
-        return [{"error": "Thiếu thành phần model MaHangHoa (dependent)."}] * len(input_data_with_hachtoan)
-    if config.TARGET_HACHTOAN not in input_data_with_hachtoan.columns:
-         return [{"error": f"Thiếu input {config.TARGET_HACHTOAN}."}] * len(input_data_with_hachtoan)
+        return [{"MaHangHoa": None, "MaHangHoa_prob": None, "is_outlier_input2": False,
+                 "error": "Thiếu thành phần model MaHangHoa (dependent)."}] * len(input_data_with_hachtoan)
 
-    results_list = []
+    if config.TARGET_HACHTOAN not in input_data_with_hachtoan.columns:
+        return [{"MaHangHoa": None, "MaHangHoa_prob": None, "is_outlier_input2": False,
+                 "error": f"Thiếu input {config.TARGET_HACHTOAN}."}] * len(input_data_with_hachtoan)
+
     n_items = len(input_data_with_hachtoan)
-    y_pred_mh=[None]*n_items; probabilities_mh=[None]*n_items; outlier_flags_2=[False]*n_items; errors=[None]*n_items
+    results_list = []
+    y_pred_mh = [None] * n_items
+    probabilities_mh = [None] * n_items
+    outlier_flags_2 = [False] * n_items
+    errors = [None] * n_items
+
     try:
+        # Đảm bảo cột HachToan là string
+        input_data = input_data_with_hachtoan.copy()
+        if config.TARGET_HACHTOAN in input_data.columns:
+            input_data[config.TARGET_HACHTOAN] = input_data[config.TARGET_HACHTOAN].astype(str)
+
+        # Căn chỉnh columns
         expected_cols = getattr(preprocessor_mh, 'feature_names_in_', None)
-        if expected_cols: input_data_aligned = input_data_with_hachtoan.reindex(columns=expected_cols, fill_value="")
-        else: input_data_aligned = input_data_with_hachtoan
+        if expected_cols:
+            input_data_aligned = input_data.reindex(columns=expected_cols, fill_value="")
+        else:
+            input_data_aligned = input_data
+
+        # Transform input
         X_transformed_mh = preprocessor_mh.transform(input_data_aligned)
-        if od2: outlier_flags_2 = check_outlier(od2, X_transformed_mh)
+
+        # Kiểm tra outlier
+        if od2:
+            try:
+                flags = check_outlier(od2, X_transformed_mh)
+                if isinstance(flags, np.ndarray):
+                    outlier_flags_2 = flags.tolist()
+                else:
+                    outlier_flags_2 = flags
+            except Exception as e:
+                logger.error(f"Lỗi khi kiểm tra outlier MH dependent: {e}", exc_info=True)
+                outlier_flags_2 = [False] * n_items
+
+        # Dự đoán
         if model_mh:
             try:
+                # Dự đoán và lấy xác suất
                 pred_enc = model_mh.predict(X_transformed_mh)
                 probs = model_mh.predict_proba(X_transformed_mh)
+
+                # Chuyển đổi từ NumPy array sang list
+                if isinstance(pred_enc, np.ndarray):
+                    pred_enc = pred_enc.tolist()
+                if isinstance(probs, np.ndarray):
+                    probs = probs.tolist()
+                elif scipy.sparse.issparse(probs):
+                    probs = probs.toarray().tolist()
+
+                # Lấy nhãn và xác suất
                 y_pred_mh = encoder_mh.inverse_transform(pred_enc)
-                probabilities_mh = np.max(probs, axis=1).tolist()  # Chuyển thành Python list
+                if isinstance(y_pred_mh, np.ndarray):
+                    y_pred_mh = y_pred_mh.tolist()
+
+                # Lấy xác suất lớn nhất cho mỗi dự đoán
+                probabilities_mh = []
+                for prob_row in probs:
+                    max_prob = max(prob_row) if prob_row else None
+                    if isinstance(max_prob, np.generic):
+                        max_prob = max_prob.item()  # Chuyển NumPy scalar sang Python scalar
+                    probabilities_mh.append(max_prob)
+
             except Exception as e:
                 logger.error(f"Client {client_id}: Lỗi khi dự đoán MH dependent: {e}", exc_info=True)
                 errors = [f"Lỗi dự đoán MaHangHoa (dependent): {e}"] * n_items
-        elif len(encoder_mh.classes_) == 1:
+                y_pred_mh = [None] * n_items
+                probabilities_mh = [None] * n_items
+
+        elif encoder_mh and len(encoder_mh.classes_) == 1:
             y_pred_mh = [encoder_mh.classes_[0]] * n_items
             probabilities_mh = [1.0] * n_items
         else:
             errors = ["Lỗi: Model MH (dependent) không tồn tại"] * n_items
-    except Exception as e: errors = [f"Lỗi dự đoán MaHangHoa (dependent): {e}"]*n_items
 
+    except Exception as e:
+        logger.error(f"Client {client_id}: Lỗi chung trong dự đoán MaHangHoa dependent: {e}", exc_info=True)
+        errors = [f"Lỗi dự đoán MaHangHoa (dependent): {e}"] * n_items
+
+    # Tạo kết quả
     for i in range(n_items):
-        prob = probabilities_mh[i] if i < len(probabilities_mh) and probabilities_mh[i] is not None else None
+        prob = None
+        if i < len(probabilities_mh) and probabilities_mh[i] is not None:
+            prob = probabilities_mh[i]
+            # Đảm bảo là Python float native
+            if isinstance(prob, (np.float64, np.float32, np.float16)):
+                prob = float(prob)
+
         err = errors[i] if i < len(errors) else None
-        if isinstance(prob, np.float64): prob = float(prob)
+
         results_list.append({
             "MaHangHoa": y_pred_mh[i] if i < len(y_pred_mh) else None,
             "MaHangHoa_prob": prob,
             "is_outlier_input2": outlier_flags_2[i] if i < len(outlier_flags_2) else False,
             "error": err
         })
-    return results_list
 
+    return results_list
 
 # --- Hàm dự đoán MaHangHoa TRỰC TIẾP (Mới) ---
 def predict_mahanghoa_direct(client_id: str, input_data: pd.DataFrame) -> List[Dict[str, Any]]:
     """Dự đoán MaHangHoa trực tiếp từ input gốc."""
     logger.info(f"Bắt đầu dự đoán MaHangHoa TRỰC TIẾP cho client {client_id}.")
     components = _load_prediction_components(client_id)
-    preprocessor_ht = components["preprocessor_ht"] # Dùng preprocessor HT
+    preprocessor_ht = components["preprocessor_ht"]  # Dùng preprocessor HT
     model_mh_direct = components["model_mh_direct"]
-    encoder_mh = components["encoder_mh"] # Dùng encoder MH chung
-    od1 = components["outlier_detector_1"] # Dùng outlier detector 1
+    encoder_mh = components["encoder_mh"]  # Dùng encoder MH chung
+    od1 = components["outlier_detector_1"]  # Dùng outlier detector 1
 
     if not preprocessor_ht or not encoder_mh:
-        return [{"error": "Thiếu thành phần preprocessor HT hoặc encoder MH."}] * len(input_data)
+        return [{"MaHangHoa": None, "MaHangHoa_prob": None, "is_outlier_input1": False,
+                 "error": "Thiếu thành phần preprocessor HT hoặc encoder MH."}] * len(input_data)
 
-    results_list = []
     n_items = len(input_data)
-    y_pred_mh=[None]*n_items; probabilities_mh=[None]*n_items; outlier_flags_1=[False]*n_items; errors=[None]*n_items
+    results_list = []
+    y_pred_mh = [None] * n_items
+    probabilities_mh = [None] * n_items
+    outlier_flags_1 = [False] * n_items
+    errors = [None] * n_items
+
     try:
+        # Căn chỉnh columns
         expected_cols = getattr(preprocessor_ht, 'feature_names_in_', None)
-        if expected_cols: input_data_aligned = input_data.reindex(columns=expected_cols, fill_value="")
-        else: input_data_aligned = input_data
+        if expected_cols:
+            input_data_aligned = input_data.reindex(columns=expected_cols, fill_value="")
+        else:
+            input_data_aligned = input_data
+
+        # Transform input
         X_transformed = preprocessor_ht.transform(input_data_aligned)
 
-        if od1: outlier_flags_1 = check_outlier(od1, X_transformed)
+        # Kiểm tra outlier
+        if od1:
+            try:
+                flags = check_outlier(od1, X_transformed)
+                if isinstance(flags, np.ndarray):
+                    outlier_flags_1 = flags.tolist()
+                else:
+                    outlier_flags_1 = flags
+            except Exception as e:
+                logger.error(f"Lỗi khi kiểm tra outlier MH Direct: {e}", exc_info=True)
+                outlier_flags_1 = [False] * n_items
 
+        # Dự đoán
         if model_mh_direct:
             try:
+                # Dự đoán và lấy xác suất
                 pred_enc = model_mh_direct.predict(X_transformed)
                 probs = model_mh_direct.predict_proba(X_transformed)
+
+                # Chuyển đổi từ NumPy array sang list
+                if isinstance(pred_enc, np.ndarray):
+                    pred_enc = pred_enc.tolist()
+                if isinstance(probs, np.ndarray):
+                    probs = probs.tolist()
+                elif scipy.sparse.issparse(probs):
+                    probs = probs.toarray().tolist()
+
+                # Lấy nhãn và xác suất
                 y_pred_mh = encoder_mh.inverse_transform(pred_enc)
-                probabilities_mh = np.max(probs, axis=1).tolist()  # Chuyển thành Python list
+                if isinstance(y_pred_mh, np.ndarray):
+                    y_pred_mh = y_pred_mh.tolist()
+
+                # Lấy xác suất lớn nhất cho mỗi dự đoán
+                probabilities_mh = []
+                for prob_row in probs:
+                    max_prob = max(prob_row) if prob_row else None
+                    if isinstance(max_prob, np.generic):
+                        max_prob = max_prob.item()  # Chuyển NumPy scalar sang Python scalar
+                    probabilities_mh.append(max_prob)
+
             except Exception as e:
                 logger.error(f"Client {client_id}: Lỗi khi dự đoán MH direct: {e}", exc_info=True)
                 errors = [f"Lỗi dự đoán MaHangHoa Direct: {e}"] * n_items
-        elif len(encoder_mh.classes_) == 1:
+                y_pred_mh = [None] * n_items
+                probabilities_mh = [None] * n_items
+
+        elif encoder_mh and len(encoder_mh.classes_) == 1:
             y_pred_mh = [encoder_mh.classes_[0]] * n_items
             probabilities_mh = [1.0] * n_items
         else:
             errors = ["Lỗi: Model MH Direct không tồn tại"] * n_items
-    except Exception as e: errors = [f"Lỗi dự đoán MaHangHoa Direct: {e}"]*n_items
 
+    except Exception as e:
+        logger.error(f"Client {client_id}: Lỗi chung trong dự đoán MaHangHoa Direct: {e}", exc_info=True)
+        errors = [f"Lỗi dự đoán MaHangHoa Direct: {e}"] * n_items
+
+    # Tạo kết quả
     for i in range(n_items):
-        prob = probabilities_mh[i] if i < len(probabilities_mh) and probabilities_mh[i] is not None else None
+        prob = None
+        if i < len(probabilities_mh) and probabilities_mh[i] is not None:
+            prob = probabilities_mh[i]
+            # Đảm bảo là Python float native
+            if isinstance(prob, (np.float64, np.float32, np.float16)):
+                prob = float(prob)
+
         err = errors[i] if i < len(errors) else None
-        if isinstance(prob, np.float64): prob = float(prob)
+
         # Chỉ trả về thông tin MH và outlier của input gốc
         results_list.append({
             "MaHangHoa": y_pred_mh[i] if i < len(y_pred_mh) else None,
             "MaHangHoa_prob": prob,
-            "is_outlier_input1": outlier_flags_1[i] if i < len(outlier_flags_1) else False, # Dùng flag 1
+            "is_outlier_input1": outlier_flags_1[i] if i < len(outlier_flags_1) else False,
             "error": err
         })
+
     return results_list
